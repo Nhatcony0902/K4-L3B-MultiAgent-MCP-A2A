@@ -22,12 +22,28 @@ PRIMARY_ISSUES = [
     "insufficient_evidence",
 ]
 TRANSPORT_RETRIES = 1
-CONFIDENCE_CLAIM_MATCH = 0.9
+CONFIDENCE_CLAIM_MATCH = 0.98
 CONFIDENCE_CLAIM_MISMATCH = 0.7
 CONFIDENCE_NO_EVIDENCE = 0.3
 LLM_DISAGREEMENT_PENALTY = 0.15
 ENTITY_CONFIDENCE_VERIFIED = 0.95
 ENTITY_CONFIDENCE_UNVERIFIED = 0.6
+
+REFUND_ISSUES = frozenset({"refund_pending", "refund_failed"})
+BASE_EVIDENCE_TOOLS = ("get_customer_history", "get_order", "get_policy")
+# Evidence precision: each issue cites only the domains that prove it.
+ISSUE_EVIDENCE_TOOLS = {
+    "late_delivery_seller": ("get_order_items", "get_shipment_summary"),
+    "late_delivery_logistics": ("get_order_items", "get_shipment_summary"),
+    "canceled_order_paid": ("get_order_items", "get_payment_timeline"),
+    "unavailable_order_paid": ("get_order_items", "get_payment_timeline"),
+    "refund_pending": ("get_payment_timeline", "get_refund_timeline"),
+    "refund_failed": ("get_payment_timeline", "get_refund_timeline"),
+    "payment_mismatch": ("get_payment_timeline",),
+    "duplicate_charge": ("get_payment_timeline",),
+    "valid_split_payment": ("get_order_items", "get_payment_timeline"),
+    "unsupported_claim": ("get_order_items", "get_shipment_summary", "get_payment_timeline"),
+}
 
 _llm_state: dict[str, LlmVerifier | None] = {}
 
@@ -142,7 +158,9 @@ async def _entity_agent(case: dict[str, Any], scope: CaseScope) -> dict[str, Any
     }
 
 
-async def _specialists(order_id: str, policy_version: str, scope: CaseScope) -> dict[str, Any]:
+async def _specialists(
+    order_id: str, policy_version: str, scope: CaseScope, need_refunds: bool
+) -> dict[str, Any]:
     scope.assign("coordinator", "order-agent", "FETCH_ORDER_ITEMS")
     scope.assign("coordinator", "shipment-agent", "ANALYZE_SHIPMENT")
     scope.assign("coordinator", "payment-agent", "ANALYZE_PAYMENT_REFUND")
@@ -152,7 +170,12 @@ async def _specialists(order_id: str, policy_version: str, scope: CaseScope) -> 
     items = await scope.fetch("order-agent", "get_order_items", order_id=order_id)
     shipment = await scope.fetch("shipment-agent", "get_shipment_summary", order_id=order_id)
     payments = await scope.fetch("payment-agent", "get_payment_timeline", order_id=order_id)
-    refunds = await scope.fetch("payment-agent", "get_refund_timeline", order_id=order_id)
+    # Query budget: refund lifecycle is only fetched when the claim is about a refund.
+    refunds = (
+        await scope.fetch("payment-agent", "get_refund_timeline", order_id=order_id)
+        if need_refunds
+        else None
+    )
     policy = await scope.fetch("policy-agent", "get_policy", policy_version=policy_version)
     for actor in ("order-agent", "shipment-agent", "payment-agent", "policy-agent"):
         scope.handoff(actor, "conflict-resolver", "SPECIALIST_RESULT")
@@ -235,13 +258,12 @@ def _facts_text(facts: rules.Facts) -> str:
 
 
 def _issue_refs(issue: str, scope: CaseScope) -> list[str]:
-    if issue in ("late_delivery_seller", "late_delivery_logistics"):
-        return scope.ref_list("get_shipment_summary", "get_order_items", "get_customer_history")
-    if issue in ("canceled_order_paid", "unavailable_order_paid"):
-        return scope.ref_list("get_customer_history", "get_order", "get_payment_timeline")
-    if issue in ("refund_pending", "refund_failed"):
-        return scope.ref_list("get_refund_timeline", "get_payment_timeline")
-    return scope.ref_list("get_payment_timeline", "get_order_items", "get_customer_history")
+    return scope.ref_list(*ISSUE_EVIDENCE_TOOLS.get(issue, ()))
+
+
+def _output_refs(issue: str, scope: CaseScope) -> list[str]:
+    tools = (*BASE_EVIDENCE_TOOLS, *ISSUE_EVIDENCE_TOOLS.get(issue, ()))
+    return list(dict.fromkeys(scope.ref_list(*tools)))[:30]
 
 
 def _insufficient_output(case_id: str, entity: dict[str, Any], scope: CaseScope) -> dict:
@@ -367,13 +389,14 @@ async def solve_case(
         return output
 
     order_id = entity["order_id"]
-    found = await _specialists(order_id, case.get("policy_version", ""), scope)
+    claims = case.get("customer_request", {}).get("claims") or []
+    issue_topics = [c.get("topic") for c in claims if c.get("topic") != "requested_full_refund"]
+    need_refunds = not issue_topics or any(t in REFUND_ISSUES for t in issue_topics)
+    found = await _specialists(order_id, case.get("policy_version", ""), scope, need_refunds)
 
     records = [o for o in entity["history_orders"] if o.get("order_id") == order_id]
     if not records and (found["order"] or entity["order_row"]):
         records = [found["order"] or entity["order_row"]]
-    claims = case.get("customer_request", {}).get("claims") or []
-    issue_topics = [c.get("topic") for c in claims if c.get("topic") != "requested_full_refund"]
     period, facts, selection = _select_scoped_facts(
         rules.candidate_periods(records), case.get("opened_at", ""), found, issue_topics
     )
@@ -432,6 +455,8 @@ async def solve_case(
                 "confidence": confidence,
                 "evidence_refs": (
                     scope.ref_list("get_payment_timeline", "get_refund_timeline", "get_policy")
+                    if issue != "unsupported_claim"
+                    else scope.ref_list("get_payment_timeline", "get_policy")
                     if c.get("topic") == "requested_full_refund"
                     else _issue_refs(issue, scope)
                 ),
@@ -470,7 +495,7 @@ async def solve_case(
             "ranked_causes": [{"cause_code": issue.upper(), "rank": 1}],
             "responsible_parties": rules.responsible_parties(rule, facts),
         },
-        "evidence_refs": list(dict.fromkeys(scope.refs.values()))[:30],
+        "evidence_refs": _output_refs(issue, scope),
         "data_conflicts": conflicts,
         "financial_resolution": {
             "currency": "BRL",

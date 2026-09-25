@@ -9,7 +9,7 @@ Input ─► coordinator ─► entity-agent ──(handoff)──► coordinato
                               │ get_customer_history
                               ▼
           ┌──────── order-agent     get_order, get_order_items
-          ├──────── shipment-agent  get_shipment_summary          (song song, asyncio.gather)
+          ├──────── shipment-agent  get_shipment_summary          (tuần tự)
           ├──────── payment-agent   get_payment_timeline, get_refund_timeline
           └──────── policy-agent    get_policy
                               │ handoff
@@ -79,7 +79,8 @@ Least privilege: mỗi actor chỉ gọi tool của domain mình; `get_order_pay
 | Invalid specialist result | 0 | verifier hạ confidence ≤ 0.5 | `verification_completed` / `FAIL_<INVARIANT>` |
 | LLM lỗi/không có key | 1 | bỏ qua, giữ kết quả rule | `verification_completed` / `LLM_UNAVAILABLE` |
 
-Budget: 7 MCP call/case (1 history + 6 specialist song song), cache theo (tool, args) trong case.
+Budget: 6 MCP call/case (7 khi claim về refund: `get_refund_timeline` chỉ gọi khi cần), tuần tự, cache theo (tool, args) trong case.
+Output `evidence_refs` chỉ gồm domain chứng minh primary issue (`ISSUE_EVIDENCE_TOOLS`) + customer/order/policy.
 Mọi evidence của một submission phải thuộc **một** MCP session (run). Session rớt ⇒ xóa toàn bộ
 output/trace và chạy lại từ đầu (≤3 lần); không bao giờ ghép kết quả từ nhiều session
 (bài học: submission ghép 3 session bị 0 điểm).
@@ -89,12 +90,12 @@ output/trace và chạy lại từ đầu (≤3 lần); không bao giờ ghép k
 Schema (runner validate), entity scope (resolved ∉ rejected), evidence chỉ từ `CaseScope` của case,
 tổng `refund_lines` = `recommended_refund_brl`, `no_action` ⇒ refund 0, refund > 0 ⇒ `action_required`,
 party seller ∈ `affected_entities.seller_ids`, `late_seller_ids` ⊆ seller_ids, action không trùng,
-`evidence_refs` không rỗng, confidence ∈ [0,1] (0.9 khớp claim, 0.7 lệch claim, −0.15 nếu LLM bất đồng).
+`evidence_refs` không rỗng, confidence ∈ [0,1] (0.98 khớp claim, 0.7 lệch claim, −0.15 nếu LLM bất đồng).
 
 ## 7. Reproducibility
 
 - Python 3.11, dependency pin trong `pyproject.toml`; rules deterministic, không random seed.
 - LLM: `temperature=0`, `max_tokens=12`, timeout 30s; cấu hình qua `LLM_API_KEY`, `LLM_BASE_URL`,
   `LLM_MODEL` trong `.env` (không commit). Tổng tham số model ≤ 8B.
-- Case chạy tuần tự trong một session; trong case tối đa 6 MCP call đồng thời. Trace timestamp tăng chặt.
+- Case chạy tuần tự trong một session; MCP call trong case tuần tự. Trace timestamp tăng chặt.
 - Lệnh: `day09 run && day09 validate && day09 package --output dist/submission.zip`.
