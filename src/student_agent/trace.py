@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,15 @@ class TraceWriter:
         self.path = path
         self.contracts = contracts
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._last_at: datetime | None = None
+
+    def _next_timestamp(self) -> datetime:
+        """Strictly increasing clock so event order is unambiguous even on coarse timers."""
+        now = datetime.now(UTC)
+        if self._last_at is not None and now <= self._last_at:
+            now = self._last_at + timedelta(microseconds=1)
+        self._last_at = now
+        return now
 
     def emit(
         self,
@@ -34,7 +43,7 @@ class TraceWriter:
             "event_id": f"evt_{secrets.token_urlsafe(18)}",
             "case_id": case_id,
             "event_type": event_type,
-            "occurred_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "occurred_at": self._next_timestamp().isoformat().replace("+00:00", "Z"),
             "actor": actor,
         }
         optional = {

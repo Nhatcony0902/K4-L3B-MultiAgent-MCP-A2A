@@ -27,20 +27,18 @@ async def _show_tools(root: Path) -> None:
             print(tool)
 
 
-MAX_CONNECTION_ATTEMPTS = 3
+# Evidence must come from ONE MCP session ("run"); a dropped session restarts the whole run.
+MAX_RUN_ATTEMPTS = 3
+RESTART_BACKOFF_SECONDS = 60
 
 
-def _drop_case_events(trace_path: Path, case_id: str) -> None:
-    """Remove trace events of a case that was interrupted before case_finalized."""
-    if not trace_path.exists():
-        return
-    marker = f'"case_id":"{case_id}"'
-    lines = trace_path.read_text(encoding="utf-8").splitlines()
-    kept = [line for line in lines if marker not in line]
-    trace_path.write_text("".join(line + "\n" for line in kept), encoding="utf-8")
+def _reset_artifacts(output_root: Path, trace_path: Path) -> None:
+    for stale in output_root.glob("*.json"):
+        stale.unlink()
+    trace_path.unlink(missing_ok=True)
 
 
-async def _run(root: Path, resume: bool = False) -> None:
+async def _run(root: Path) -> None:
     settings = Settings.load(root)
     case_set = load_case_set(root)
     contracts = Contracts(root / "contracts" / "schemas")
@@ -48,38 +46,31 @@ async def _run(root: Path, resume: bool = False) -> None:
     trace_path = root / "traces" / "trace.jsonl"
     output_root.mkdir(parents=True, exist_ok=True)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
-    if not resume:
-        for stale in output_root.glob("*.json"):
-            stale.unlink()
-        trace_path.unlink(missing_ok=True)
-    trace = TraceWriter(trace_path, contracts)
 
-    pending = [c for c in case_set.case_ids if not (output_root / f"{c}.json").exists()]
-    for case_id in pending:
-        _drop_case_events(trace_path, case_id)
-    failures = 0
-    while pending:
+    for attempt in range(1, MAX_RUN_ATTEMPTS + 1):
+        _reset_artifacts(output_root, trace_path)
+        trace = TraceWriter(trace_path, contracts)
         try:
             async with connect_gateway(
                 settings.mcp_endpoint, settings.team_api_key, contracts
             ) as gateway:
                 if not await gateway.list_tools():
                     raise RuntimeError("MCP Gateway returned no tools")
-                while pending:
-                    case_id = pending[0]
+                for case_id in case_set.case_ids:
                     await _solve_one(
                         case_set.cases[case_id], gateway, trace, contracts, output_root
                     )
-                    pending.pop(0)
-                    failures = 0
+            return
         except ValueError:
-            raise  # contract/validation bug: reconnecting would not help
-        except Exception as exc:  # connection dropped: resume from the interrupted case
-            failures += 1
-            if not pending or failures >= MAX_CONNECTION_ATTEMPTS:
-                raise RuntimeError(f"MCP session failed {failures}x; rerun with --resume") from exc
-            print(f"WARN: MCP session dropped at {pending[0]} ({type(exc).__name__}); reconnecting")
-            _drop_case_events(trace_path, pending[0])
+            raise  # contract/validation bug: restarting would not help
+        except Exception as exc:  # session dropped: never mix sessions, restart from scratch
+            if attempt == MAX_RUN_ATTEMPTS:
+                _reset_artifacts(output_root, trace_path)
+                raise RuntimeError(
+                    f"MCP session dropped {attempt}x; no partial output kept"
+                ) from exc
+            print(f"WARN: MCP run failed ({type(exc).__name__}: {exc}); restarting full run")
+            await asyncio.sleep(RESTART_BACKOFF_SECONDS * attempt)
 
 
 async def _solve_one(
@@ -104,10 +95,7 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("validate-inputs", help="validate case-set.json and all 100 inputs")
     commands.add_parser("mcp-tools", help="authenticate and list discovered MCP tools")
-    run = commands.add_parser("run", help="run the implemented workflow for all cases")
-    run.add_argument(
-        "--resume", action="store_true", help="keep finished outputs; run only missing cases"
-    )
+    commands.add_parser("run", help="run the implemented workflow for all cases")
     commands.add_parser("validate", help="validate outputs and observable trace")
     package = commands.add_parser("package", help="validate and build the submission ZIP")
     package.add_argument("--output", default="dist/submission.zip")
@@ -126,7 +114,7 @@ def main() -> None:
         elif args.command == "mcp-tools":
             asyncio.run(_show_tools(root))
         elif args.command == "run":
-            asyncio.run(_run(root, resume=args.resume))
+            asyncio.run(_run(root))
         elif args.command == "validate":
             case_set = load_case_set(root)
             contracts = Contracts(root / "contracts" / "schemas")

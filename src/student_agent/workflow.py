@@ -32,6 +32,10 @@ ENTITY_CONFIDENCE_UNVERIFIED = 0.6
 _llm_state: dict[str, LlmVerifier | None] = {}
 
 
+class GatewayUnavailable(Exception):
+    """MCP refused calls that must succeed; the runner restarts the whole run."""
+
+
 def _llm() -> LlmVerifier | None:
     if "verifier" not in _llm_state:
         config = LlmConfig.from_env()
@@ -105,6 +109,10 @@ async def _entity_agent(case: dict[str, Any], scope: CaseScope) -> dict[str, Any
     history = None
     if hint:
         history = await scope.fetch("entity-agent", "get_customer_history", customer_unique_id=hint)
+    if hint and history is None:
+        # Customer history must exist for a hinted customer; a refusal means the gateway is
+        # unhealthy, so abort the whole run instead of emitting a degraded answer.
+        raise GatewayUnavailable(f"get_customer_history refused for {scope.case_id}")
     history_orders = (history or {}).get("orders") or []
     owned = {o.get("order_id") for o in history_orders}
 
@@ -139,6 +147,7 @@ async def _specialists(order_id: str, policy_version: str, scope: CaseScope) -> 
     scope.assign("coordinator", "shipment-agent", "ANALYZE_SHIPMENT")
     scope.assign("coordinator", "payment-agent", "ANALYZE_PAYMENT_REFUND")
     scope.assign("coordinator", "policy-agent", "LOAD_POLICY")
+    # Sequential on purpose: bursts of parallel calls triggered gateway refusals.
     order = await scope.fetch("order-agent", "get_order", order_id=order_id)
     items = await scope.fetch("order-agent", "get_order_items", order_id=order_id)
     shipment = await scope.fetch("shipment-agent", "get_shipment_summary", order_id=order_id)
