@@ -30,6 +30,9 @@ ENTITY_CONFIDENCE_VERIFIED = 0.95
 ENTITY_CONFIDENCE_UNVERIFIED = 0.6
 
 REFUND_ISSUES = frozenset({"refund_pending", "refund_failed"})
+SHIPMENT_ISSUES = frozenset(
+    {"late_delivery_seller", "late_delivery_logistics", "unsupported_claim"}
+)
 BASE_EVIDENCE_TOOLS = ("get_customer_history", "get_order", "get_policy")
 # Evidence precision: each issue cites only the domains that prove it.
 ISSUE_EVIDENCE_TOOLS = {
@@ -159,7 +162,11 @@ async def _entity_agent(case: dict[str, Any], scope: CaseScope) -> dict[str, Any
 
 
 async def _specialists(
-    order_id: str, policy_version: str, scope: CaseScope, need_refunds: bool
+    order_id: str,
+    policy_version: str,
+    scope: CaseScope,
+    need_refunds: bool,
+    need_shipment: bool,
 ) -> dict[str, Any]:
     scope.assign("coordinator", "order-agent", "FETCH_ORDER_ITEMS")
     scope.assign("coordinator", "shipment-agent", "ANALYZE_SHIPMENT")
@@ -168,7 +175,12 @@ async def _specialists(
     # Sequential on purpose: bursts of parallel calls triggered gateway refusals.
     order = await scope.fetch("order-agent", "get_order", order_id=order_id)
     items = await scope.fetch("order-agent", "get_order_items", order_id=order_id)
-    shipment = await scope.fetch("shipment-agent", "get_shipment_summary", order_id=order_id)
+    # Query budget: shipment evidence is only cited for delivery or unsupported claims.
+    shipment = (
+        await scope.fetch("shipment-agent", "get_shipment_summary", order_id=order_id)
+        if need_shipment
+        else None
+    )
     payments = await scope.fetch("payment-agent", "get_payment_timeline", order_id=order_id)
     # Query budget: refund lifecycle is only fetched when the claim is about a refund.
     refunds = (
@@ -392,7 +404,10 @@ async def solve_case(
     claims = case.get("customer_request", {}).get("claims") or []
     issue_topics = [c.get("topic") for c in claims if c.get("topic") != "requested_full_refund"]
     need_refunds = not issue_topics or any(t in REFUND_ISSUES for t in issue_topics)
-    found = await _specialists(order_id, case.get("policy_version", ""), scope, need_refunds)
+    need_shipment = not issue_topics or any(t in SHIPMENT_ISSUES for t in issue_topics)
+    found = await _specialists(
+        order_id, case.get("policy_version", ""), scope, need_refunds, need_shipment
+    )
 
     records = [o for o in entity["history_orders"] if o.get("order_id") == order_id]
     if not records and (found["order"] or entity["order_row"]):

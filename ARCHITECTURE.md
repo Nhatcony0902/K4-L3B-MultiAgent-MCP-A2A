@@ -79,7 +79,7 @@ Least privilege: mỗi actor chỉ gọi tool của domain mình; `get_order_pay
 | Invalid specialist result | 0 | verifier hạ confidence ≤ 0.5 | `verification_completed` / `FAIL_<INVARIANT>` |
 | LLM lỗi/không có key | 1 | bỏ qua, giữ kết quả rule | `verification_completed` / `LLM_UNAVAILABLE` |
 
-Budget: 6 MCP call/case (7 khi claim về refund: `get_refund_timeline` chỉ gọi khi cần), tuần tự, cache theo (tool, args) trong case.
+Budget: 5–6 MCP call/case, tuần tự, cache theo (tool, args): `get_refund_timeline` chỉ khi claim về refund, `get_shipment_summary` chỉ khi claim về giao hàng hoặc unsupported.
 Output `evidence_refs` chỉ gồm domain chứng minh primary issue (`ISSUE_EVIDENCE_TOOLS`) + customer/order/policy.
 Mọi evidence của một submission phải thuộc **một** MCP session (run). Session rớt ⇒ xóa toàn bộ
 output/trace và chạy lại từ đầu (≤3 lần); không bao giờ ghép kết quả từ nhiều session
