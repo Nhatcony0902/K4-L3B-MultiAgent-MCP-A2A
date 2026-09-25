@@ -16,10 +16,13 @@ class EvidenceGateway:
     def __init__(self, session: ClientSession, contracts: Contracts) -> None:
         self._session = session
         self._contracts = contracts
+        self.discovered_tools: frozenset[str] = frozenset()
 
     async def list_tools(self) -> list[str]:
         response = await self._session.list_tools()
-        return sorted(tool.name for tool in response.tools)
+        names = sorted(tool.name for tool in response.tools)
+        self.discovered_tools = frozenset(names)
+        return names
 
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}

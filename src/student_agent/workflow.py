@@ -82,6 +82,11 @@ class CaseScope:
         self.emit("handoff", actor, target=target, decision_code=code)
 
     async def fetch(self, actor: str, tool: str, **arguments: str) -> Any:
+        discovered = getattr(self.gateway, "discovered_tools", None)
+        if discovered and tool not in discovered:
+            # Only call tools the gateway advertised; never guess tool names.
+            self.emit("tool_result_consumed", actor, tool_name=tool, decision_code="NOT_DISCOVERED")
+            return None
         key = (tool, tuple(sorted(arguments.items())))
         if key in self._cache:
             evidence = self._cache[key]

@@ -9,8 +9,8 @@ Input ─► coordinator ─► entity-agent ──(handoff)──► coordinato
                               │ get_customer_history
                               ▼
           ┌──────── order-agent     get_order, get_order_items
-          ├──────── shipment-agent  get_shipment_summary          (tuần tự)
-          ├──────── payment-agent   get_payment_timeline, get_refund_timeline
+          ├──────── shipment-agent  get_shipment_summary*         (* chỉ khi claim cần)
+          ├──────── payment-agent   get_payment_timeline, get_refund_timeline*
           └──────── policy-agent    get_policy
                               │ handoff
                               ▼
@@ -23,6 +23,9 @@ MCP evidence ──► tool_result_consumed (trace, evidence_ref) ──► evid
 
 - Quyết định nghiệp vụ: **deterministic rules** (`src/student_agent/rules.py`), không I/O, có unit test.
 - LLM: `meta-llama/llama-3.1-8b-instruct` (8B, < 10B) qua OpenRouter; chỉ là second opinion, không ghi field output.
+  Tắt khi không có `LLM_API_KEY` (bài nộp hiện tại chạy không LLM ⇒ tổng tham số model = 0).
+- Tool discovery: runner gọi `list_tools()` đầu session; `CaseScope.fetch` chỉ gọi tool có trong danh sách
+  discovered (không đoán tên tool), thiếu tool ⇒ `NOT_DISCOVERED`, không bịa evidence.
 - Orchestration + trace: `src/student_agent/workflow.py`.
 
 ## 2. Agent ownership
